@@ -18,6 +18,7 @@ fixtures = [
     {"dt": PACKAGING_UNIT_DOCTYPE_NAME},
     {"dt": UNIT_OF_QUANTITY_DOCTYPE_NAME},
     {"dt": TAXATION_TYPE_DOCTYPE_NAME},
+    
 ]
 
 # Apps

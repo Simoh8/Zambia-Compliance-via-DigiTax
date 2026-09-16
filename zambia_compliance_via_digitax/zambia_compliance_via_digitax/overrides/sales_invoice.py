@@ -46,6 +46,7 @@ def generic_invoices_on_submit_override(
 
     company_name = doc.company
     settings_doc = get_settings(company_name)
+    # frappe.throw(frappe.as_json(settings_doc,indent=2))
 
     # Skip if prevented or already submitted
     if doc.custom_prevent_sis_submission or getattr(doc, "vsdc_invoice_number", None):
@@ -66,10 +67,8 @@ def generic_invoices_on_submit_override(
         payload = build_invoice_payload(doc, settings_doc.name)
         route_key = "saveSales"
 
-    
+    # frappe.throw(frappe.as_json(payload, indent=2))
     process_request(
-        # queue="default",
-        # is_async=True,
         request_data=payload,
         route_key=route_key,
         handler_function=sales_information_submission_on_success,
@@ -80,6 +79,8 @@ def generic_invoices_on_submit_override(
     )
 
 
+
+
 def sales_information_submission_on_success(
     response: dict, document_name: str, doctype: str, settings_name: str, **kwargs
 ) -> None:
@@ -87,7 +88,6 @@ def sales_information_submission_on_success(
     Callback executed after a successful Sales Invoice submission to ZRA Smart Invoice.
     Updates the ERPNext document with ZRA response details and triggers reconciliation.
     """
-    from ..apis.sales_invoice import get_invoice_details
     if not response:
         frappe.throw("Empty response from ZRA Smart Invoice system.")
 
@@ -100,20 +100,11 @@ def sales_information_submission_on_success(
         "custom_successfully_submitted": 1,
         "custom_sent_to_digitax": 1,
         "custom_sales_id": result_data.get("id"),
-        # "custom_trader_invoice_number": result_data.get("trader_invoice_number"),
         "custom_sale_no": result_data.get("sale_number"),
-        # "custom_invoice_kind": result_data.get("kind"),
         "custom_receipt_type_": result_data.get("receipt_type_code"),
         "custom_receipt_number": result_data.get("receipt_number"),
-        # "custom_lpo_number": result_data.get("lpo_number"),
-        # "custom_destination_country": result_data.get("destination_country_code"),
-        # "custom_currency_code": result_data.get("currency_code"),
-        # "custom_exchange_rate": result_data.get("exchange_rate"),
         "custom_submission_status": result_data.get("status"),
         "custom_sale_date": result_data.get("sale_date"),
-
-        # "custom_cash_discount_rate": result_data.get("cash_discount_rate"),
-        # "custom_cash_discount_amount": result_data.get("cash_discount_amount"),
     }
 
     # Update tax summary
@@ -132,16 +123,7 @@ def sales_information_submission_on_success(
     })
 
     if result_data.get("created_at"):
-        updates["custom_created_at"] = get_datetime(
-            result_data.get("created_at"))
-    # Update ERPNext document
-    frappe.db.set_value(doctype, document_name, updates)
-    frappe.publish_realtime(
-        "refresh_form",
-        {"name": document_name},
-        doctype=doctype,
-        docname=document_name
-    )
+        updates["custom_created_at"] = get_datetime(result_data.get("created_at"))
 
     item_list = result_data.get("item_list", [])
 
@@ -151,8 +133,7 @@ def sales_information_submission_on_success(
         row = next(
             (r for r in invoice.items if r.custom_sis_item_id == item.get("item_id")), None)
         if not row:
-            row = next((r for r in invoice.items if r.item_code ==
-                       item.get("item_code")), None)
+            row = next((r for r in invoice.items if r.item_code == item.get("item_code")), None)
         if not row:
             frappe.logger().warning(
                 f"Could not match item {item.get('item_code')} in invoice {document_name}")
@@ -171,14 +152,93 @@ def sales_information_submission_on_success(
             "custom_tot_tax_amount": item.get("tot_tax_amount"),
         })
 
-    # Enqueue background fetch for reconciliation
+    # Update ERPNext document (moved out of the item loop so it only runs once)
+    frappe.db.set_value(doctype, document_name, updates)
+    frappe.publish_realtime(
+        "refresh_form",
+        {"name": document_name},
+        doctype=doctype,
+        docname=document_name
+    )
+
+    # Hand reconciliation off to a background worker. The delay and retry logic
+    # live inside the job itself, so the request thread returns immediately.
     frappe.enqueue(
-        get_invoice_details,
-        queue="long",
+        _fetch_invoice_details_with_retry,
+        queue="short",
+        enqueue_after_commit=True,  # only fires once this transaction is committed
         document_name=document_name,
         invoice_type=doctype,
         settings_name=settings_name,
     )
+
+
+PENDING_STATUSES = {"pending", "processing", "submitted"}  # adjust to match your actual status values
+
+
+def _fetch_invoice_details_with_retry(
+    document_name: str,
+    invoice_type: str,
+    settings_name: str,
+    attempt: int = 1,
+    max_attempts: int = 6,
+    base_delay_seconds: int = 2,
+) -> None:
+    """
+    Runs in the background worker (not the request thread). The transaction is
+    often still "pending" on ZRA's side right after submission, so this polls:
+    wait briefly, fetch the latest details, check whether the status has moved
+    past pending, and if not, re-enqueue itself with backoff. Gives up after
+    max_attempts and logs so it doesn't poll forever.
+    """
+    import time
+    from ..apis.sales_invoice import get_invoice_details
+
+    # Backoff: 2s, 4s, 8s, 16s, 32s, 64s ... capped by max_attempts
+    delay = base_delay_seconds * (2 ** (attempt - 1))
+    time.sleep(delay)
+
+    try:
+        get_invoice_details(
+            document_name=document_name,
+            invoice_type=invoice_type,
+            settings_name=settings_name,
+        )
+    except Exception:
+        frappe.log_error(
+            frappe.get_traceback(),
+            f"ZRA get_invoice_details call failed (attempt {attempt}, {document_name})",
+        )
+        current_status = None  # treat as unresolved, fall through to retry logic below
+    else:
+        current_status = frappe.db.get_value(
+            invoice_type, document_name, "custom_submission_status"
+        )
+
+    still_pending = (current_status or "").strip().lower() in PENDING_STATUSES
+
+    if not still_pending:
+        # Status has moved on (approved/rejected/whatever terminal state ZRA uses) — done.
+        return
+
+    if attempt >= max_attempts:
+        frappe.log_error(
+            f"Status for {document_name} still '{current_status}' after {attempt} attempts — giving up.",
+            "ZRA get_invoice_details still pending",
+        )
+        return
+
+    frappe.enqueue(
+        _fetch_invoice_details_with_retry,
+        queue="short",
+        document_name=document_name,
+        invoice_type=invoice_type,
+        settings_name=settings_name,
+        attempt=attempt + 1,
+        max_attempts=max_attempts,
+        base_delay_seconds=base_delay_seconds,
+    )
+
 
 
 def sales_information_submission_on_error(

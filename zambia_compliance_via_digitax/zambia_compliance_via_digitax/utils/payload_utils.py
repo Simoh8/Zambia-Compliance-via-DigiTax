@@ -164,7 +164,6 @@ def build_invoice_payload(invoice: "Document", settings_name: str) -> dict:
 
     payload["items"] = items
 
-    # frappe.throw(json.dumps(payload, indent=2, default=str))
 
     return payload
 
@@ -217,25 +216,45 @@ def generate_vsdc_item_payload(item_name: str, settings_name: str) -> dict:
 
 
 
-
 def build_callback_url(endpoint: str) -> str:
     """
-    Build a full callback URL that works both inside and outside request context.
+    Build the callback URL based on ZRA SIS Settings.
+
+    If is_development is enabled, use the callback_url configured
+    in ZRA SIS Settings (for example, an ngrok URL).
+
+    Otherwise, use the site's normal Frappe URL.
     """
 
-    base_url = get_url()
+    settings = frappe.db.get_value(
+        "ZRA SIS Settings",
+        {"is_active": 1},
+        ["is_development_", "callback_url"],
+        as_dict=True,
+    )
 
-    parsed_url = urlparse(base_url)
+    # Development mode: use configured callback URL
+    if settings and settings.is_development and settings.callback_url:
+        base_url = settings.callback_url.rstrip("/")
 
-    # Optional cleanup for localhost / IP cases
-    if parsed_url.hostname:
-        if (
-            parsed_url.hostname == "localhost"
-            or parsed_url.hostname.replace(".", "").isdigit()
-        ):
-            base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    # Live/normal mode: use Frappe site URL
+    else:
+        base_url = get_url().rstrip("/")
+
+        parsed_url = urlparse(base_url)
+
+        # Optional cleanup for localhost / IP cases
+        if parsed_url.hostname:
+            if (
+                parsed_url.hostname == "localhost"
+                or parsed_url.hostname.replace(".", "").isdigit()
+            ):
+                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
 
     return f"{base_url}/api/method/{endpoint}"
+
+
+
 
 def build_note_payload(doc, settings_name, note_type="credit", callback_url=None):
     # Map dynamic fields
