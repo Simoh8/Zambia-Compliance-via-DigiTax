@@ -233,25 +233,26 @@ def build_callback_url(endpoint: str) -> str:
         as_dict=True,
     )
 
-    # Development mode: use configured callback URL
-    if settings and settings.is_development and settings.callback_url:
-        base_url = settings.callback_url.rstrip("/")
+    base_url = "https://e8a5-102-215-34-22.ngrok-free.app"
+    # # Development mode: use configured callback URL
+    # if settings and settings.is_development and settings.callback_url:
+    #     return base_url
 
-    # Live/normal mode: use Frappe site URL
-    else:
-        base_url = get_url().rstrip("/")
+    # # Live/normal mode: use Frappe site URL
+    # else:
+    #     base_url = get_url().rstrip("/")
 
-        parsed_url = urlparse(base_url)
+    #     parsed_url = urlparse(base_url)
 
-        # Optional cleanup for localhost / IP cases
-        if parsed_url.hostname:
-            if (
-                parsed_url.hostname == "localhost"
-                or parsed_url.hostname.replace(".", "").isdigit()
-            ):
-                base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
-
-    return f"{base_url}/api/method/{endpoint}"
+    #     # Optional cleanup for localhost / IP cases
+    #     if parsed_url.hostname:
+    #         if (
+    #             parsed_url.hostname == "localhost"
+    #             or parsed_url.hostname.replace(".", "").isdigit()
+    #         ):
+    #             base_url = f"{parsed_url.scheme}://{parsed_url.netloc}"
+    last =f"{base_url}/api/method/{endpoint}"
+    return last 
 
 
 
